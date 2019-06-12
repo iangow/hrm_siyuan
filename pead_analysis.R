@@ -6,6 +6,7 @@ Sys.setenv(PGHOST = "10.101.13.99", PGDATABASE="crsp")
 Sys.setenv(PGUSER="siyuanh1", PGPASSWORD="temp_20190510")
 
 pg <- dbConnect(RPostgres::Postgres())
+rs <- dbExecute(pg, "SET work_mem = '3GB'")
 funda <- tbl(pg, sql("SELECT * FROM comp.funda"))
 fundq <- tbl(pg, sql("SELECT * FROM comp.fundq"))
 trading_days <- tbl(pg, sql("SELECT * FROM crsp.dsi"))
@@ -35,24 +36,26 @@ annc_date <-
 eff_calend <-
   trading_days %>%
   select(date) %>%
-  filter(date > as.Date("1976-01-01")) %>%
-  mutate(td = rank(date))
+  filter(date > "1976-01-01") %>%
+  mutate(td = rank(date)) %>%
+  collect()
 
-date1 <- summarise(eff_calend, min(date)) %>% pull()
-date2 <- summarise(eff_calend, max(date)) %>% pull()
 calendar <-
-  tibble(date = seq(from = date1, to = date2, by = 1))
+  tibble(date = seq(from = summarise(eff_calend, min(date)) %>% pull(),
+                    to = summarise(eff_calend, max(date)) %>% pull(),
+                    by = 1))
 
 # Effective dates of annoucements
 eff_dates <-
   calendar %>%
-  left_join(eff_calend, copy = TRUE) %>%
+  left_join(eff_calend) %>%
   arrange(date) %>%
   fill(td, .direction = "up") %>%
   rename(eff_date = date) %>%
-  left_join(eff_calend, copy = TRUE) %>%
+  left_join(eff_calend) %>%
   rename(annc_date = eff_date, eff_date = date) %>%
-  select(annc_date, eff_date)
+  select(annc_date, eff_date) %>%
+  copy_to(pg, ., overwrite = TRUE)
 
 daily_prc <- tbl(pg, sql("SELECT * FROM crsp.dsf"))
 dsi <- tbl(pg, sql("SELECT * FROM crsp.dsi"))
@@ -64,15 +67,15 @@ daily_ret <-
   left_join(dsi %>% select(date, vwretd)) %>%
   mutate(ab_ret = ret - vwretd) %>%
   select(cusip, date, ab_ret) %>%
-  filter(date > as.Date("1976-01-01"))
+  filter(date > "1976-01-01")
+
 daily_ret
 
-
-# Effective annoucement dates of firm-year
-effect_dates<-
+# Effective announcement dates of firm-year
+effect_dates <-
   annc_date %>%
   rename(annc_date = rdq) %>%
-  left_join(eff_dates, copy= TRUE) %>%
+  left_join(eff_dates) %>%
   select(cusip, fyearq, eff_date) %>%
   rename(fyear = fyearq, anncdate = eff_date)
 
@@ -98,35 +101,35 @@ temp3 <-
   select(cusip, leadfyear, anncdate) %>%
   rename(fyear = leadfyear)
 
-temp_sum<-
-  bind_rows(as.data.frame(temp1), as.data.frame(temp2), as.data.frame(temp3))
+temp_sum <-
+  union_all(temp1, temp2, temp3)
 
 # Dates to consider for every firm-year
 temp_final <-
-  as_tibble(temp_sum) %>%
+  temp_sum %>%
   arrange(cusip, fyear) %>%
   mutate(cusip = substr(cusip, 1, 8)) %>%
   select(cusip, fyear, anncdate) %>%
-  left_join(gb_news, copy =TRUE) %>%
-  filter(!is.na(news))
+  left_join(gb_news) %>%
+  filter(!is.na(news)) %>%
+  compute()
 
 end <-
   daily_ret %>%
-  mutate(fyear = as.integer(substr(as.character(date), 1, 4))) %>%
-  left_join(temp_final, copy = TRUE) %>%
+  mutate(fyear = as.integer(date_part('year', date))) %>%
+  left_join(temp_final) %>%
   filter(!is.na(anncdate)) %>%
   mutate(day = date - anncdate) %>%
-  filter(day < 180, day > -360)
+  filter(day < 180, day > -360) %>%
+  compute()
 
 result <-
   end %>%
   select(ab_ret, day, news) %>%
   group_by(news, day) %>%
   summarise(avg_ret = mean(ab_ret)) %>%
-  group_by(news) %>%
-  arrange(day)
-
-result
+  ungroup() %>%
+  compute()
 
 new_data <-
   result %>%
