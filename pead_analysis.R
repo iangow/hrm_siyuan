@@ -128,13 +128,14 @@ result <-
 
 result
 
-
-
-more<-
+new_data <-
   result %>%
-  as.data.frame(result)
-write.csv(more, "filename.csv")
-new_data<- read.csv("pead.data.csv")
+  group_by(news) %>%
+  arrange(day) %>%
+  mutate(car = cumsum(avg_ret)) %>%
+  arrange(news, day) %>%
+  collect()
+
 library(ggplot2)
 ggplot(new_data, mapping = aes(x = day, y = car, color = news)) +
   geom_line()
